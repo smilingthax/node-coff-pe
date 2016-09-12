@@ -1,5 +1,5 @@
-PE file format
-==============
+NodeJS: PE file format
+======================
 
 Read Windows EXE/DLL/... files with NodeJS.
 
@@ -29,5 +29,5 @@ TODO: Update, Write.
 
 Copyright (c) 2016 Tobias Hoffmann
 
-License: http://opensource.org/licenses/MIT
+License: https://opensource.org/licenses/MIT
 
