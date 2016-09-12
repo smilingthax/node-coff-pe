@@ -1,0 +1,23 @@
+{
+  "name": "node-coff-pe",
+  "version": "0.1.0",
+  "description": "PE file format",
+  "main": "pe.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/smilingthax/node-coff-pe"
+  },
+  "keywords": [
+    "windows",
+    "pe",
+    "coff"
+  ],
+  "author": "Tobias Hoffmann",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/smilingthax/node-coff-pe/issues"
+  }
+}
