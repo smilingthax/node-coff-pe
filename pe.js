@@ -125,6 +125,23 @@ function readSectionHeaders(fd, coffhdr, cb) {
   });
 }
 
+// cb(err, length) // length==null, if outside file
+function readStringTableLength(fd, coffhdr, cb) {
+  // assert(coffhdr);
+  var buffer = new Buffer(4);
+  fs.read(fd, buffer, 0, buffer.length, coffhdr._fileOffsets.stringStart, function(err, bytesRead, buf) {
+    if (err) {
+      cb(err);
+    } else if (bytesRead == 0) {
+      cb(null, null);
+    } else if (bytesRead < buf.length) {
+      cb(new Error('File too short?'));
+    } else {
+      cb(null, buf.readUInt32LE(0, true));
+    }
+  });
+}
+
 function parseDataDirectoryEntry(buf, offset) {
   // assert(buf.length>=offset+0x08);
   return {
@@ -328,7 +345,17 @@ module.exports = {
             }
           }
           readSectionHeaders(fd, coffhdr, function(err) {
-            cb(err, exehdr, coffhdr);
+            if ( (!err)&&(coffhdr.PointerToSymbolTable) ) {
+              readStringTableLength(fd, coffhdr, function(err, len) {
+                if ( (!err)&&(len!==null) ) {
+                  coffhdr._fileOffsets.stringEnd = coffhdr._fileOffsets.stringStart + len;
+                }
+                cb(err, exehdr, coffhdr);
+              });
+            } else {
+              // stringEnd = null.
+              cb(err, exehdr, coffhdr);
+            }
           });
         });
       }
