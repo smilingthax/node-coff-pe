@@ -150,13 +150,19 @@ function parseDataDirectoryEntry(buf, offset) {
   };
 }
 
-function parsePEOptHeader(buf, len) {
-  // assert(buf.length>=len);
-  if (len < 0x1c) { // 28
-    return 'COFF Optional too short';
+function parseDataDirectory(dst, end, buf) {
+  if (buf.length < (end-dst.length)*8) {
+    // -> second call required, to continue from where had to stop
+    end = (Math.floor(buf.length/8) + dst.length)*8;
   }
-  var coff = {
-    // COFF Optional
+  for (var i=dst.length,j=0; i<end; i++,j++) {
+    dst[i] = parseDataDirectoryEntry(buf, 8*j);
+  }
+}
+
+function parseCoffOptional(buf) {
+  // assert(buf.length>=0x1c); // 28
+  return {
     Signature: buf.readUInt16LE(0, true), // or: Magic
     MajorLinkerVersion: buf.readUInt8(2, true),
     MinorLinkerVersion: buf.readUInt8(3, true),
@@ -167,16 +173,12 @@ function parsePEOptHeader(buf, len) {
     BaseOfCode: buf.readUInt32LE(20, true),
     BaseOfData: buf.readUInt32LE(24, true)
   };
-  if ( (coff.Signature !== 0x10b)&&(coff.Signature !== 0x20b)&&
-       (coff.Signature !== 0x107) ) { // TODO?
-    if (len > 0x1c) {
-      coff._more = buf.slice(28, len);
-    }
-    return coff;
-  } else if (len < 0x60) { // 96
-    return 'PE Header too short';
-  }
-  var pe = {
+}
+
+// starting at 0x1c, i.e. after COFF Optional
+function parsePEOptional(buf) {
+  // assert(buf.length>=0x60); // 96
+  return {
     ImageBase: buf.readUInt32LE(28, true),
     SectionAlignment: buf.readUInt32LE(32, true),
     FileAlignment: buf.readUInt32LE(36, true),
@@ -200,23 +202,73 @@ function parsePEOptHeader(buf, len) {
     NumberOfRvaAndSizes: buf.readUInt32LE(92, true),
     DataDirectory: []
   };
-  if (pe.Signature == 0x20b) { // PE32+
+}
+
+function makeUInt64(hi32, lo32) { // no 64 bit type in nodejs...
+  return [hi32, lo32]; // TODO?
+}
+
+// starting at 0x1c (actually 0x18, by using coff.BaseOfData)
+function parsePE32Plus(buf, coff) {
+  // assert(buf.length>=0x70); // 112
+  var pe = parsePEOptional(buf);
+
+  pe.ImageBase = makeUInt64(pe.ImageBase, coff.BaseOfData);
+  pe.BaseOfData = null;  // - will overwrite coff.BaseOfData in parsePEOptHeader! -
+  pe.SizeOfStackReserve = makeUInt64(pe.SizeOfStackCommit, pe.SizeOfStackReserve);
+  pe.SizeOfStackCommit = makeUInt64(pe.SizeOfHeapCommit, pe.SizeOfHeapReserve);
+  pe.SizeOfHeapReserve = makeUInt64(pe.NumberOfRvaAndSizes, pe.LoaderFlags);
+  pe.SizeOfHeapCommit = makeUInt64(buf.readUInt32LE(100, true), buf.readUInt32LE(96, true));
+  pe.LoaderFlags = buf.readUInt32LE(104, true);
+  pe.NumberOfRvaAndSizes = buf.readUInt32LE(108, true);
+
+  return pe;
+}
+
+// including COFF Optional
+function parsePEOptHeader(buf, len) {
+  // "assert(buf.length>=len);" // i.e. >= coffhdr.SizeOfOptionalHeader -- CAVE: not entirely true, only first 16 DataDirectory entries are covered
+  if (len < 0x1c) { // 28
+    return 'COFF Optional too short';
+  }
+  var coff = parseCoffOptional(buf);
+  var pe;
+  switch (coff.Signature) {
+  case 0x10b:
+  case 0x107: // TODO? "ROM Image"...
+    if (len < 0x60) { // 96
+      return 'PE Header too short';
+    }
+    pe = parsePEOptional(buf); //, 28);  TODO?
+    if (len < 0x60 + 8*pe.NumberOfRvaAndSizes) {
+      return 'PE Header(DataDirectory) too short';
+    } else if (len > 0x60 + 8*pe.NumberOfRvaAndSizes) {
+      return 'PE Header too long';
+    }
+    // assert((buf.length-0x60)%8==0); // <-> (buf.length%8==0)
+    parseDataDirectory(pe.DataDirectory, pe.NumberOfRvaAndSizes, buf.slice(0x60));
+    break;
+
+  case 0x20b: // PE32+ (i.e. 64bit)
     if (len < 0x70) { // 112
       return 'PE32+ Header too short';
     }
-    pe.ImageBase = [ret.ImageBase, ret.BaseOfData]; // no 64 bit type in nodejs...
-    pe.BaseOfData = null;
-    pe.SizeOfStackReserve = [ret.SizeOfStackCommit, ret.SizeOfStackReserve];
-    pe.SizeOfStackCommit = [ret.SizeOfHeapCommit, ret.SizeOfHeapReserve];
-    pe.SizeOfHeapReserve = [ret.NumberOfRvaAndSizes, ret.LoaderFlags];
-    pe.SizeOfHeapCommit = [buf.readUInt32LE(100, true), buf.readUInt32LE(96, true)];
-    pe.LoaderFlags = buf.readUInt32LE(104, true);
-    pe.NumberOfRvaAndSizes = buf.readUInt32LE(108, true);
-    if (len > 0x70 + 8*pe.NumberOfRvaAndSizes) {
-      pe._more = buf.slice(112, len);
+    pe = parsePE32Plus(buf, coff);
+    if (len < 0x70 + 8*pe.NumberOfRvaAndSizes) {
+      return 'PE32+ Header(DataDirectory) too short';
+    } else if (len > 0x70 + 8*pe.NumberOfRvaAndSizes) {
+      return 'PE32+ Header too long';
     }
-  } else if (len > 0x60 + 8*pe.NumberOfRvaAndSizes) {
-    pe._more = buf.slice(96, len);
+    // assert((buf.length-0x70)%8==0); // <-> (buf.length%8==0)
+    parseDataDirectory(pe.DataDirectory, pe.NumberOfRvaAndSizes, buf.slice(0x70));
+    break;
+
+  default:
+    if (len > 0x1c) {
+      coff._more = 28; // cannot buf.slice(28, len), when buf.length<len !
+    }
+    // note: (e.g.) .DataDirectory not present!
+    return coff;
   }
   for (var k in pe) {
     coff[k] = pe[k];
@@ -233,7 +285,7 @@ function readCoffPE(fd, exehdr, cb) {
     cb(new Error('Bad e_lfanew value'), exehdr);
     return;
   }
-  var buffer = new Buffer(0x18 + 0x70 + 16*8);
+  var buffer = new Buffer(0x18 + 0x70 + 16*8); // %8==0, for parseDataDirectory "alignment"
   fs.read(fd, buffer, 0, 0x108, exehdr.e_lfanew, function(err, bytesRead, buf) {
     if (err) {
       cb(err, exehdr);
@@ -258,38 +310,36 @@ function readCoffPE(fd, exehdr, cb) {
         coffhdr._fileOffsets.stringStart = coffhdr.PointerToSymbolTable + 0x12*coffhdr.NumberOfSymbols;
       }
       if (coffhdr.SizeOfOptionalHeader) {
-        if (bytesRead < 0x18+coffhdr.SizeOfOptionalHeader) {
+        if (bytesRead < Math.min(0x18+coffhdr.SizeOfOptionalHeader, buf.length)) { // TODO?!  ... better?
           cb(new Error('File too short'), exehdr, coffhdr);
           return;
         }
         var peopt = parsePEOptHeader(buf.slice(0x18), coffhdr.SizeOfOptionalHeader);
         if (typeof peopt === 'string') {
-          // TODO? coffhdr.Optional = buf.slice(0x18, 0x18+coffhdr.SizeOfOptionalHeader);
+          // TODO? coffhdr.Optional = buf.slice(0x18, 0x18+coffhdr.SizeOfOptionalHeader);   - but: buf might not contain all of it!
           cb(new Error(peopt), exehdr, coffhdr);
           return;
         }
+        // TODO?  fixup  peopt._more: buf.slice / read all of it   (but: denial of service? ...)
         coffhdr.Optional = peopt;
         coffhdr._fileOffsets.headerEnd = coffhdr.Optional.SizeOfHeaders; // not PE: undefined
-        if (coffhdr.Optional.NumberOfRvaAndSizes>0) {
-          for (var i=0, len=Math.min(coffhdr.Optional.NumberOfRvaAndSizes, 16); i<len; i++) {
-            coffhdr.Optional.DataDirectory[i] = parseDataDirectoryEntry(buf, 0x78 + 8*i);
-          }
-          if (coffhdr.Optional.NumberOfRvaAndSizes > 16) {
-            var buffer = new Buffer((coffhdr.Optional.NumberOfRvaAndSizes-16)*8);
-            fs.read(fd, buffer, 0, buffer.length, exehdr.e_lfanew + 0xf8, function(err, bytesRead, buf) {
-              if (err) {
-                cb(err, exehdr, coffhdr);
-              } else if (bytesRead < buf.length) {
-                cb(new Error('File too short'), exehdr, coffhdr);
-              } else {
-                for (var i=16, len=coffhdr.Optional.NumberOfRvaAndSizes; i<len; i++) {
-                  coffhdr.Optional.DataDirectory[i] = parseDataDirectoryEntry(buf, (i - 16)*8);
-                }
-                cb(null, exehdr, coffhdr);
-              }
-            });
-            return;
-          }
+        if ( (coffhdr.Optional.NumberOfRvaAndSizes)&&  // not: coff optional only, w/o pe
+             (coffhdr.Optional.DataDirectory.length < coffhdr.Optional.NumberOfRvaAndSizes) ) { // NumberOfRvaAndSizes > 16 (PE32+; 18 for PE...)
+          var buffer = new Buffer((coffhdr.Optional.NumberOfRvaAndSizes-coffhdr.DataDirectory.length)*8);
+          // assert(0x108==0x18+coffhdr.SizeOfOptionalHeader-buffer.length); // "alignment" (buf.length%8==0)
+          fs.read(fd, buffer, 0, buffer.length, exehdr.e_lfanew + 0x108, function(err, bytesRead, buf) {
+            if (err) {
+              cb(err, exehdr, coffhdr);
+            } else if (bytesRead < buf.length) {
+              cb(new Error('File too short'), exehdr, coffhdr);
+            } else {
+              // fill in remaining pieces
+              parseDataDirectory(coffhdr.Optional.DataDirectory, coffhdr.Optional.NumberOfRvaAndSizes, buf);
+              // assert(coffhdr.Optional.DataDirectory.length==coffhdr.DataDirectory.NumberOfRvaAndSizes);
+              cb(null, exehdr, coffhdr);
+            }
+          });
+          return;
         }
       } else {
         coffhdr._fileOffsets.headerEnd = coffhdr._fileOffsets.sectionEnd; // TODO?
