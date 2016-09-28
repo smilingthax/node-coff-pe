@@ -115,8 +115,10 @@ function readSectionHeaders(fd, coffhdr, cb) {
     } else {
       coffhdr._sectionMap = {};
       for (var i=0, len=coffhdr.NumberOfSections; i<len; i++) {
-        coffhdr.SectionHeaders[i] = parseSectionHeader(buf, 0x28*i);
-        coffhdr._sectionMap[cstring(coffhdr.SectionHeaders[i].Name)] = i;
+        var secthdr = parseSectionHeader(buf, 0x28*i);
+        secthdr._name = cstring(secthdr.Name);
+        coffhdr.SectionHeaders[i] = secthdr;
+        coffhdr._sectionMap[secthdr._name] = i;
       }
       cb(null);
     }
