@@ -28,6 +28,32 @@ function parseDosHeader(buf) {
   };
 }
 
+function serializeDosHeader(buf, hdr) {
+  // assert(buf.length>=0x40); // 64
+  buf[0] = 0x4d; // M
+  buf[1] = 0x5a; // Z
+  buf.writeUInt16LE(hdr.lastsize, 2, true);
+  buf.writeUInt16LE(hdr.nblocks, 4, true);
+  buf.writeUInt16LE(hdr.nreloc, 6, true);
+  buf.writeUInt16LE(hdr.hdrsize, 8, true);
+  buf.writeUInt16LE(hdr.minalloc, 10, true);
+  buf.writeUInt16LE(hdr.maxalloc, 12, true);
+  buf.writeUInt16LE(hdr.ss, 14, true);
+  buf.writeUInt16LE(hdr.sp, 16, true);
+  buf.writeUInt16LE(hdr.checksum, 18, true);
+  buf.writeUInt16LE(hdr.ip, 20, true);
+  buf.writeUInt16LE(hdr.cs, 22, true);
+  buf.writeUInt16LE(hdr.relocpos, 24, true);
+  buf.writeUInt16LE(hdr.noverlay, 26, true);
+
+  // PE, etc ...:  (if relocpos >= 0x40)
+  hdr.reserved1.copy(buf, 28, 0, 8);
+  buf.writeUInt16LE(hdr.oem_id, 36, true);
+  buf.writeUInt16LE(hdr.oem_info, 38, true);
+  hdr.reserved2.copy(buf, 40, 0, 20);
+  buf.writeUInt32LE(hdr.oem_info, 60, true);
+}
+
 // cb(err, exehdr)
 function readExe(fd, cb) {
   var buffer = new Buffer(0x40); // expect pe...
@@ -77,6 +103,23 @@ function parseSectionHeader(buf, offset) {
   };
 }
 
+function serializeSectionHeader(buf, offset, hdr) {
+  // assert(buf.length>=offset+0x28); // 40
+  hdr.Name.copy(buf, offset, 0, 8);                       // FIXME: from string...
+  buf.writeUInt32LE(hdr.PhysicalAddress_VirtualSize, offset+8, true);
+  buf.writeUInt32LE(hdr.VirtualAddress, offset+12, true);
+  buf.writeUInt32LE(hdr.SizeOfRawData, offset+16, true);
+  buf.writeUInt32LE(hdr.PointerToRawData, offset+20, true);
+
+  // TODO? or: Reserved(12 bytes)
+  buf.writeUInt32LE(hdr.PointerToRelocations, offset+24, true);
+  buf.writeUInt32LE(hdr.PointerToLinenumbers, offset+28, true);
+  buf.writeUInt16LE(hdr.NumberOfRelocations, offset+32, true);
+  buf.writeUInt16LE(hdr.NumberOfLinenumbers, offset+34, true);
+
+  buf.writeUInt32LE(hdr.Characteristics, offset+36, true);
+}
+
 function parseCoffHeader(buf) {
   // assert(buf.length>=0x14); // 20
   return {
@@ -92,6 +135,19 @@ function parseCoffHeader(buf) {
 //    SymbolTable: null,
 //    StringTable: null
   };
+}
+
+// everything _after_ 'PE\0\0'
+function serializeCoffHeader(buf, hdr) {
+  // assert(buf.length>=0x14); // 20
+  buf.writeUInt16LE(hdr.Machine, 0, true);
+  buf.writeUInt16LE(hdr.NumberOfSections, 2, true);
+  buf.writeUInt32LE(hdr.TimeDateStamp, 4, true);
+  buf.writeUInt32LE(hdr.PointerToSymbolTable, 8, true);
+  buf.writeUInt32LE(hdr.NumberOfSymbols, 12, true);
+  buf.writeUInt16LE(hdr.SizeOfOptionalHeader, 16, true);
+  buf.writeUInt16LE(hdr.Characteristics, 18, true);
+  // Optional, SectionHeaders  are added later
 }
 
 function cstring(buf) {
@@ -150,6 +206,12 @@ function parseDataDirectoryEntry(buf, offset) {
   };
 }
 
+function serializeDataDirectoryEntry(buf, offset, entry) {
+  // assert(buf.length>=offset+0x08);
+  buf.writeUInt32LE(entry.VirtualAddress, offset, true);
+  buf.writeUInt32LE(entry.Size, offset+4, true);
+}
+
 function parseDataDirectory(dst, end, buf) {
   if (buf.length < (end-dst.length)*8) {
     // -> second call required, to continue from where had to stop
@@ -157,6 +219,13 @@ function parseDataDirectory(dst, end, buf) {
   }
   for (var i=dst.length,j=0; i<end; i++,j++) {
     dst[i] = parseDataDirectoryEntry(buf, 8*j);
+  }
+}
+
+function serializeDataDirectory(buf, offset, hdr) {
+  // assert(hdr.NumberOfRvaAndSizes==hdr.DataDirectory.length); // TODO ... FIXME? ...
+  for (var i=0, len=hdr.NumberOfRvaAndSizes; i<len; i++) {
+    serializeDataDirectoryEntry(buf, offset + 8*i, hdr.DataDirectory[i]);
   }
 }
 
@@ -173,6 +242,21 @@ function parseCoffOptional(buf) {
     BaseOfCode: buf.readUInt32LE(20, true),
     BaseOfData: buf.readUInt32LE(24, true)
   };
+}
+
+function serializeCoffOptional(buf, coff) {
+  // assert(buf.length>=0x1c); // 28
+  buf.writeUInt16LE(coff.Signature, 0, true);
+  buf.writeUInt8LE(coff.MajorLinkerVersion, 2, true);
+  buf.writeUInt8LE(coff.MinorLinkerVersion, 3, true);
+  buf.writeUInt32LE(coff.SizeOfCode, 4, true);
+  buf.writeUInt32LE(coff.SizeOfInitializedData, 8, true);
+  buf.writeUInt32LE(coff.SizeOfUninitializedData, 12, true);
+  buf.writeUInt32LE(coff.AddressOfEntryPoint, 16, true);
+  buf.writeUInt32LE(coff.BaseOfCode, 20, true);
+  if (coff.BaseOfData != null) { // not present in PE32+ ...
+    buf.writeUInt32LE(coff.BaseOfData, 24, true);
+  }
 }
 
 // starting at 0x1c, i.e. after COFF Optional
@@ -208,6 +292,11 @@ function makeUInt64(hi32, lo32) { // no 64 bit type in nodejs...
   return [hi32, lo32]; // TODO?
 }
 
+function writeUInt64LE(buf, value, offset) { // no 64 bit type in nodejs...
+  buf.writeUInt32LE(value[1], offset, true); // TODO?
+  buf.writeUInt32LE(value[0], offset+4, true);
+}
+
 // starting at 0x1c (actually 0x18, by using coff.BaseOfData)
 function parsePE32Plus(buf, coff) {
   // assert(buf.length>=0x70); // 112
@@ -223,6 +312,53 @@ function parsePE32Plus(buf, coff) {
   pe.NumberOfRvaAndSizes = buf.readUInt32LE(108, true);
 
   return pe;
+}
+
+// starting at 0x1c (when not PE32+)
+function serializePEOptional(buf, pe, _peplus/*=false*/) { // _peplus used internally, via serializePE32Plus
+  // assert(buf.length>=0x60); // 96
+  if (!_peplus) {
+    buf.writeUInt32LE(pe.ImageBase, 28, true);
+  } else {
+    writeUInt64LE(buf, pe.ImageBase, 24);
+  }
+  buf.writeUInt32LE(pe.SectionAlignment, 32, true);
+  buf.writeUInt32LE(pe.FileAlignment, 36, true);
+  buf.writeUInt16LE(pe.MajorOSVersion, 40, true);
+  buf.writeUInt16LE(pe.MinorOSVersion, 42, true);
+  buf.writeUInt16LE(pe.MajorImageVersion, 44, true);
+  buf.writeUInt16LE(pe.MinorImageVersion, 46, true);
+  buf.writeUInt16LE(pe.MajorSubsystemVersion, 48, true);
+  buf.writeUInt16LE(pe.MinorSubsystemVersion, 50, true);
+  buf.writeUInt32LE(pe.Win32VersionValue, 52, true); // Reserved1 ?
+  buf.writeUInt32LE(pe.SizeOfImage, 56, true);
+  buf.writeUInt32LE(pe.SizeOfHeaders, 60, true);
+  buf.writeUInt32LE(pe.Checksum, 64, true);
+  buf.writeUInt16LE(pe.Subsystem, 68, true);
+  buf.writeUInt16LE(pe.DLLCharacteristics, 70, true);
+  if (!_peplus) {
+    buf.writeUInt32LE(pe.SizeOfStackReserve, 72, true);
+    buf.writeUInt32LE(pe.SizeOfStackCommit, 76, true);
+    buf.writeUInt32LE(pe.SizeOfHeapReserve, 80, true);
+    buf.writeUInt32LE(pe.SizeOfHeapCommit, 84, true);
+    buf.writeUInt32LE(pe.LoaderFlags, 88, true);
+    buf.writeUInt32LE(pe.NumberOfRvaAndSizes, 92, true);
+  } else {
+    writeUInt64LE(buf, pe.SizeOfStackReserve, 72);
+    writeUInt64LE(buf, pe.SizeOfStackCommit, 80);
+    writeUInt64LE(buf, pe.SizeOfHeapReserve, 88);
+    writeUInt64LE(buf, pe.SizeOfHeapCommit, 96);
+    buf.writeUInt32LE(pe.LoaderFlags, 104, true);
+    buf.writeUInt32LE(pe.NumberOfRvaAndSizes, 108, true);
+  }
+  // DataDirectory  added later
+}
+
+// starting at 0x18
+function serializePE32Plus(buf, pe) {
+  // assert(buf.length>=0x70); // 112
+  // assert(coff.BaseOfData==null);
+  serializePEOptional(buf, pe, true);
 }
 
 // including COFF Optional
@@ -274,6 +410,39 @@ function parsePEOptHeader(buf, len) {
     coff[k] = pe[k];
   }
   return coff;
+}
+
+// including data directory
+function serializePEOptHeader(hdr) {
+  var buf;
+  switch (hdr.Signature) {
+  case 0x10b:
+  case 0x107: // TODO? "ROM Image"...
+    buf = new Buffer(0x60 + 8*hdr.NumberOfRvaAndSizes); // 96
+    serializeCoffOptional(buf, hdr);
+    serializePEOptional(buf, hdr);
+    serializeDataDirectory(buf, 0x60, hdr);
+    return buf;
+
+  case 0x20b: // PE32+ (i.e. 64bit)
+    buf = new Buffer(0x70 + 8*hdr.NumberOfRvaAndSizes); // 112
+    // assert(hdr.BaseOfData==null);
+    serializeCoffOptional(buf, hdr);
+    serializePE32Plus(buf, hdr);
+    serializeDataDirectory(buf, 0x70, hdr);
+    return buf;
+
+  default:
+    if (!hdr._more) {
+      buf = new Buffer(0x1c); // 28
+      serializeCoffOptional(buf, hdr);
+    } else {
+      buf = new Buffer(0x1c + hdr._more.length);
+      serializeCoffOptional(buf, hdr);
+      hdr._more.copy(buf, 28);
+    }
+    return buf;
+  }
 }
 
 // cb(err, exehdr, coffhdr)
