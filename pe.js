@@ -3,31 +3,34 @@ var fs = require('fs');
 
 function parseDosHeader(buf) {
   // assert(buf.length>=0x40); // 64
+  // (NOTE: for best compatibility, hdrsize*16 shall be multiple of 512 [but not in pe...?])
   return {
-    lastsize: buf.readUInt16LE(2, true),
-    nblocks: buf.readUInt16LE(4, true),
+    lastsize: buf.readUInt16LE(2, true),  // bytes_used_in_last_block; 0 means 512!
+    nblocks: buf.readUInt16LE(4, true),   // blocks_in_file (block = 512 bytes)
     nreloc: buf.readUInt16LE(6, true),
-    hdrsize: buf.readUInt16LE(8, true),
-    minalloc: buf.readUInt16LE(10, true),
-    maxalloc: buf.readUInt16LE(12, true),
+    hdrsize: buf.readUInt16LE(8, true),   // header_paragraphs (paragraph = 16 bytes)
+    minalloc: buf.readUInt16LE(10, true), // min_extra_paragraphs
+    maxalloc: buf.readUInt16LE(12, true), // max_extra_paragraphs
     ss: buf.readUInt16LE(14, true),
     sp: buf.readUInt16LE(16, true),
-    checksum: buf.readUInt16LE(18, true),
+    checksum: buf.readUInt16LE(18, true), // (usually just 0)
     ip: buf.readUInt16LE(20, true),
     cs: buf.readUInt16LE(22, true),
-    relocpos: buf.readUInt16LE(24, true),
-    noverlay: buf.readUInt16LE(26, true),
+    relocpos: buf.readUInt16LE(24, true), // reloc_table_offset
+    noverlay: buf.readUInt16LE(26, true), // overlay_number (main program: 0)
+
+    // PE, etc ...:  (if relocpos >= 0x40)
     reserved1: buf.slice(28, 28+8),
     oem_id: buf.readUInt16LE(36, true),
     oem_info: buf.readUInt16LE(38, true),
     reserved2: buf.slice(40, 40+20),
-    e_lfanew: buf.readUInt32LE(60, true)
+    e_lfanew: buf.readUInt32LE(60, true) // 0 = just exe (?)
   };
 }
 
 // cb(err, exehdr)
 function readExe(fd, cb) {
-  var buffer = new Buffer(0x40);
+  var buffer = new Buffer(0x40); // expect pe...
   fs.read(fd, buffer, 0, 0x40, 0, function(err, bytesRead, buf) {
     if (err) {
       cb(err);
@@ -35,8 +38,22 @@ function readExe(fd, cb) {
       cb(new Error('File too short'));
     } else if ( (buf[0]!==0x4d)||(buf[1]!==0x5a) ) { // MZ
       cb(new Error('Not an EXE file'));
+    } else if ( (buf[24]<0x40)&&(buf[25]===0x00) ) {
+      cb(new Error('Not a PE file'));  // TODO?
     } else {
-      cb(null, parseDosHeader(buf));
+      var exehdr = parseDosHeader(buf);
+      var extraStart = exehdr.nblocks * 512;
+      if (exehdr.lastsize) {
+        extraStart += exehdr.lastsize - 512;
+      }
+      exehdr._fileOffsets = {
+        start: 0,
+        relocStart: exehdr.relocpos, // (e.g.) PE-part of header is between 0x1c and this value
+        // relocEnd: exehdr.relocpos + 4*exehdr.nreloc, // (==dataStart...(?))
+        dataStart: exehdr.hdrsize * 16, // reloc is part of hdr!
+        extraStart: extraStart // "after exe data"  // (?? TODO? +dataStart???)
+      };
+      cb(null, exehdr);
     }
   });
 }
@@ -44,7 +61,7 @@ function readExe(fd, cb) {
 function parseSectionHeader(buf, offset) {
   // assert(buf.length>=offset+0x28); // 40
   return {
-    Name: buf.slice(offset, offset+8), //  .toString(),     // TODO/FIXME:   if "/4" -> @217905 (0x35331)  -? string table ?  (but executables dont have one -> long names not supported...?)
+    Name: buf.slice(offset, offset+8), //  .toString(),     // TODO/FIXME:   if "/4" -> @217905 (0x35331)  -? string table ?  (but executables dont have one -> long names not supported...? [mingw does generate them...])
     PhysicalAddress_VirtualSize: buf.readUInt32LE(offset+8, true), // VirtualSize.
     VirtualAddress: buf.readUInt32LE(offset+12, true),
     SizeOfRawData: buf.readUInt32LE(offset+16, true),
@@ -72,6 +89,8 @@ function parseCoffHeader(buf) {
     Characteristics: buf.readUInt16LE(18, true),
     Optional: null, // esp. PE Optional Header
     SectionHeaders: []
+//    SymbolTable: null,
+//    StringTable: null
   };
 }
 
@@ -209,8 +228,16 @@ function readCoffPE(fd, exehdr, cb) {
         start: exehdr.e_lfanew,
         optionalStart: exehdr.e_lfanew + 0x18,
         sectionStart: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader,
-        end: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader + 0x28 * coffhdr.NumberOfSections
+        sectionEnd: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader + 0x28 * coffhdr.NumberOfSections,
+        headerEnd: null,
+        symbolStart: null,
+        stringStart: null,
+        stringEnd: null
       };
+      if (coffhdr.PointerToSymbolTable) {
+        coffhdr._fileOffsets.symbolStart = coffhdr.PointerToSymbolTable;
+        coffhdr._fileOffsets.stringStart = coffhdr.PointerToSymbolTable + 0x12*coffhdr.NumberOfSymbols;
+      }
       if (coffhdr.SizeOfOptionalHeader) {
         if (bytesRead < 0x18+coffhdr.SizeOfOptionalHeader) {
           cb(new Error('File too short'), exehdr, coffhdr);
@@ -223,6 +250,7 @@ function readCoffPE(fd, exehdr, cb) {
           return;
         }
         coffhdr.Optional = peopt;
+        coffhdr._fileOffsets.headerEnd = coffhdr.Optional.SizeOfHeaders; // not PE: undefined
         if (coffhdr.Optional.NumberOfRvaAndSizes>0) {
           for (var i=0, len=Math.min(coffhdr.Optional.NumberOfRvaAndSizes, 16); i<len; i++) {
             coffhdr.Optional.DataDirectory[i] = parseDataDirectoryEntry(buf, 0x78 + 8*i);
@@ -244,6 +272,8 @@ function readCoffPE(fd, exehdr, cb) {
             return;
           }
         }
+      } else {
+        coffhdr._fileOffsets.headerEnd = coffhdr._fileOffsets.sectionEnd; // TODO?
       }
       cb(null, exehdr, coffhdr);
     }
@@ -360,7 +390,7 @@ module.exports = {
   },
   PESubsystems: {
     0: 'Unknown',
-    1: 'Native',
+    1: 'Native', // e.g. a driver
     2: 'Windows GUI',
     3: 'Windows CUI',
     5: 'OS/2 CUI',
