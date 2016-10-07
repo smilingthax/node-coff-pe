@@ -1,6 +1,6 @@
 {
   "name": "node-coff-pe",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PE file format",
   "main": "pe.js",
   "scripts": {
